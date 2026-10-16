@@ -11,6 +11,7 @@
 
 #include "bt.h"
 #include "config.h"
+#include "desktop.h"
 #include "macro.h"
 #include "wake.h"
 #include "device/usbd.h"
@@ -983,6 +984,47 @@ void pico_cmd_set(uint8_t cmd_id, uint8_t const *buffer, uint16_t bufsize) {
             const bool on = (bufsize >= 1) && (buffer[0] != 0);
             macro_suspend(on);
             buf[3] = on ? 1 : 0;
+            feature_data[0x84].assign(buf, buf + sizeof(buf));
+            break;
+        }
+
+        case 0x68: {
+            // READ device-global Desktop settings. Not a config field: Desktop
+            // is not part of a slot. Reply on 0x84, same reason as slot info.
+            //   0x66 0x68 status desktop fallback lb_en r g b hold_cs chord[4]
+            DesktopSettings s{};
+            desktop_get(s);
+            uint8_t buf[63]{};
+            buf[0] = 0x66; buf[1] = 0x68; buf[2] = 0x00;
+            buf[3] = s.desktop_slot_id;
+            buf[4] = s.fallback_slot_id;
+            buf[5] = s.lightbar_enabled;
+            buf[6] = s.lightbar_r;
+            buf[7] = s.lightbar_g;
+            buf[8] = s.lightbar_b;
+            buf[9] = s.hold_cs;
+            memcpy(buf + 10, &s.chord, 4);
+            feature_data[0x84].assign(buf, buf + sizeof(buf));
+            break;
+        }
+
+        case 0x69: {
+            // WRITE Desktop settings. Payload is 11 bytes:
+            // desktop, fallback, lb_en, r, g, b, hold_cs, chord[4] little-endian.
+            // Reply: 0x66 0x69 status.
+            uint8_t buf[63]{}; buf[0] = 0x66; buf[1] = 0x69; buf[2] = 0x01;
+            if (bufsize >= 11) {
+                DesktopSettings s{};
+                s.desktop_slot_id  = buffer[0];
+                s.fallback_slot_id = buffer[1];
+                s.lightbar_enabled = buffer[2];
+                s.lightbar_r       = buffer[3];
+                s.lightbar_g       = buffer[4];
+                s.lightbar_b       = buffer[5];
+                s.hold_cs          = buffer[6];
+                memcpy(&s.chord, buffer + 7, 4);
+                if (desktop_set(s)) buf[2] = 0x00;
+            }
             feature_data[0x84].assign(buf, buf + sizeof(buf));
             break;
         }

@@ -11,6 +11,7 @@
 #include <cstring>
 
 #include "config.h"
+#include "desktop.h"
 #include "flash_map.h"
 #include "input_buttons.h"
 #include "utils.h"
@@ -1019,8 +1020,47 @@ void macro_on_input(const uint8_t *report, uint16_t len) {
     if (!g_loaded) macro_load();
 
     const uint32_t disable = get_config().macro_disable;
+    const uint32_t now = now_ms();
+
+    // ORDER MATTERS: debounce FIRST, then latch the half.
+    //
+    // The pad's switch chatters - contacts break and remake within a few
+    // milliseconds of a press. Latching before the debounce meant every bounce
+    // looked like a fresh press: the latch cleared, and because the finger's
+    // contact patch shifts slightly between bounces, the next edge could latch
+    // the OTHER half. One press fired both bindings, the second for only a
+    // split second. It also re-armed the chord on every bounce, which reset the
+    // long-press timer and made a hold fire its short action immediately.
+    //
+    // Debouncing first hides the chatter, so the latch sees one clean press and
+    // holds one half for its whole duration. This is what DS4Windows does:
+    // decide the zone at finger-down, on a debounced press.
+    const uint32_t raw_mask = debounce(button_mask(report, len), now);
+
+    // touch_task first: it maintains g_touch_x0 (where the finger landed), which
+    // the click half is derived from. Running it after would use the PREVIOUS
+    // touch's landing point for the click that just arrived. Skip it while the
+    // host is suspended so a reconnect cannot classify a gesture.
+    if (!wake_host_is_suspended()) touch_task(report, len, now, disable);
+    const uint32_t mask = apply_pad_half(raw_mask);
+    // Device-global, so it runs even when this slot has every macro disabled.
+    // Record mode (g_suspended) tracks the release but drops the pending
+    // toggle. Host suspend must still see the real mask: the USB reconnect
+    // after a slot switch looks like a suspend, and feeding a zero mask there
+    // latched the chord shut so the next press never changed the slot.
+    desktop_on_buttons(mask, now, g_suspended);
+
+    if (wake_host_is_suspended()) {
+        macro_reset();
+        return;
+    }
+
     if (!macro_any_enabled(disable)) {
-        g_chord = 0; g_stable = 0;
+        g_chord = 0;
+        // g_stable is left alone. Zeroing it here used to be harmless because
+        // this return happened before debounce; now debounce has already run
+        // so the Desktop chord (and a macro re-enabled mid-hold) keep a real
+        // release timer.
         // hold_task() is the ONLY thing that clears these, and this return
         // skips it - so whatever the last enabled tick left behind stayed set
         // forever. Harmless while stick suppression only lasted as long as a
@@ -1047,32 +1087,6 @@ void macro_on_input(const uint8_t *report, uint16_t len) {
         g_pulse_btn = 0;
         return;
     }
-
-    // Every wake rule applies: nothing may transmit while the host is
-    // suspended, and nothing may be left latched when it goes down.
-    if (wake_host_is_suspended()) { macro_reset(); return; }
-
-    const uint32_t now  = now_ms();
-    // ORDER MATTERS: debounce FIRST, then latch the half.
-    //
-    // The pad's switch chatters - contacts break and remake within a few
-    // milliseconds of a press. Latching before the debounce meant every bounce
-    // looked like a fresh press: the latch cleared, and because the finger's
-    // contact patch shifts slightly between bounces, the next edge could latch
-    // the OTHER half. One press fired both bindings, the second for only a
-    // split second. It also re-armed the chord on every bounce, which reset the
-    // long-press timer and made a hold fire its short action immediately.
-    //
-    // Debouncing first hides the chatter, so the latch sees one clean press and
-    // holds one half for its whole duration. This is what DS4Windows does:
-    // decide the zone at finger-down, on a debounced press.
-    const uint32_t raw_mask = debounce(button_mask(report, len), now);
-
-    // touch_task first: it maintains g_touch_x0 (where the finger landed), which
-    // the click half is derived from. Running it after would use the PREVIOUS
-    // touch's landing point for the click that just arrived.
-    touch_task(report, len, now, disable);
-    const uint32_t mask = apply_pad_half(raw_mask);
 
     motion_task(report, len, mask, disable);
     hold_task(report, len, mask, disable);
@@ -1211,6 +1225,9 @@ void macro_reset() {
     g_hold_pending = false;
     g_chord      = 0;
     g_stable     = 0;
+    // Do not desktop_disarm() here. macro_reset() runs on every report while
+    // the host looks suspended, including the reconnect after a Desktop
+    // toggle, and occupying the latch there swallowed the next press.
     g_touch_down = false;
     memset(g_off_since, 0, sizeof(g_off_since));
     if (g_pb_busy || g_pb_n) {

@@ -550,6 +550,11 @@ static void active_profile_set(uint8_t idx) {
 // slot_out = 0xFF and returns false when nothing is being tracked (fresh boot or
 // a config not loaded from a slot). Otherwise fills the source slot's name and
 // sets edited when the live config has diverged from the loaded snapshot.
+uint8_t active_slot_index() {
+    if (g_active_slot < 0) return 0xFF;
+    return (uint8_t) g_active_slot;
+}
+
 bool active_profile_get(uint8_t &slot_out, bool &edited_out, uint8_t name_out[SLOT_NAME_LEN]) {
     if (g_active_slot < 0 || !g_active_snapshot_valid) {
         slot_out = 0xFF;

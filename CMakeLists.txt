@@ -114,6 +114,7 @@ add_executable(ds5-bridge
         src/dse.cpp
         src/config.cpp
         src/cmd.cpp
+        src/desktop.cpp
         src/state_mgr.cpp
         src/ram_mem.c
 )

@@ -16,6 +16,7 @@
 #include "pico/time.h"
 #include "config.h"
 #include "battery_notify.h"
+#include "desktop.h"
 #include "utils.h"
 
 namespace {
@@ -352,8 +353,20 @@ void __not_in_flash_func(state_set)(uint8_t *data, const uint8_t size) {
         data[45] = 0x00;   // LedGreen
         data[46] = 0x00;   // LedBlue
     }
-    // Battery notification. Last, so it wins over the lightbar_off override for
-    // the few seconds it runs - the whole point is that it is seen.
+    // Desktop colour sits above the profile/game light (including lightbar_off
+    // on the Desktop slot itself) and below the battery notification. Leaving
+    // the Desktop slot stops the override; nothing here is saved to put back.
+    {
+        uint8_t dr = 0, dg = 0, db = 0;
+        if (size > 46 && desktop_lightbar_override(dr, dg, db)) {
+            data[1] |= 0x04;
+            data[44] = dr;
+            data[45] = dg;
+            data[46] = db;
+        }
+    }
+    // Battery notification. Last, so it wins over the lightbar_off override and
+    // over the Desktop colour for the few seconds it runs.
     //
     // It restores itself: while a blink is running these bytes are overwritten
     // on every outgoing report, and the moment it ends they are simply left

@@ -25,6 +25,7 @@
 #include "pico/stdio_usb.h"
 #endif
 #include "config.h"
+#include "desktop.h"
 #include "battery_notify.h"
 #include "cmd.h"
 #include "dse.h"
@@ -1420,6 +1421,7 @@ int main() {
     wake_init();
 
     config_load();
+    desktop_boot();
 
     bt_init();
     bt_register_data_callback(on_bt_data);
@@ -1498,7 +1500,7 @@ int main() {
                 // blink could never animate. Still inside the interval gate above,
                 // so this composes at the synth cadence rather than every pass.
                 if (state_synth_tick() || battery_notify_wants_report() ||
-                    player_led_wants_report()) {
+                    player_led_wants_report() || desktop_lightbar_wants_report()) {
                     uint8_t outputData[78]{};
                     outputData[0] = 0x31;
                     outputData[1] = reportSeqCounter << 4;
@@ -1529,6 +1531,7 @@ int main() {
         // lightbar. They are separate indicators for separate distances and
         // either may be used without the other.
         battery_notify_tick();
+        desktop_task();
         g_batt_raw = interrupt_in_data[52];
         button_check();
         bt_inquiring_led();

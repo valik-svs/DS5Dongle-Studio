@@ -630,7 +630,8 @@ async function readCmdReply(cmdId, expectIdx, tries=30){
   // 0x0d) reply on SLOT_REPORT so neither this portal's 1-second 0x81
   // diagnostic poll nor bulk config ops can consume their replies. Bulk config
   // get/set (0x0b/0x0c) are PORTAL commands and stay on 0x81.
-  const rid = (cmdId === 0x08 || cmdId === 0x09 || cmdId === 0x0a || cmdId === 0x0d) ? SLOT_REPORT : GET_REPORT;
+  const rid = (cmdId === 0x08 || cmdId === 0x09 || cmdId === 0x0a || cmdId === 0x0d
+            || cmdId === 0x68 || cmdId === 0x69) ? SLOT_REPORT : GET_REPORT;
   return readCmdReplyOn(rid, cmdId, expectIdx, tries);
 }
 async function slotInfo(idx){
@@ -639,6 +640,177 @@ async function slotInfo(idx){
   if (!r || r[2] !== 0x00) return null; // old firmware or bad slot index
   const name = new TextDecoder().decode(r.slice(6, 22)).replace(/\0+$/,'').trim();
   return { valid: r[4] === 1, cfgVersion: r[5], name };
+}
+
+// Device-global Desktop toggle (this fork). Not a profile field: one slot is
+// marked Desktop, and a chord swaps to it and back. Reply on 0x84.
+async function desktopRead(){
+  await sendCmd(0x68, []);
+  const r = await readCmdReply(0x68, undefined, 10);
+  if (!r || r[2] !== 0x00 || r.length < 14) return null;
+  const chord = (r[10] | (r[11]<<8) | (r[12]<<16) | (r[13]<<24)) >>> 0;
+  return { desktop: r[3], fallback: r[4], lightbar: r[5] === 1,
+           r: r[6], g: r[7], b: r[8], hold_cs: r[9], chord };
+}
+async function desktopWrite(s){
+  const c = s.chord >>> 0;
+  const args = [s.desktop & 0xFF, s.fallback & 0xFF, s.lightbar ? 1 : 0,
+                s.r & 255, s.g & 255, s.b & 255, s.hold_cs & 255,
+                c & 255, (c >> 8) & 255, (c >> 16) & 255, (c >>> 24) & 255];
+  await sendCmd(0x69, args);
+  const r = await readCmdReply(0x69, undefined, 12);
+  return !!(r && r[2] === 0x00);
+}
+function desktopBoxHTML(s, infos){
+  if (!s) {
+    return '<div style="font-size:12px;color:var(--sub);margin-bottom:8px">Desktop toggle needs this fork\'s firmware.</div>';
+  }
+  const opts = ['<option value="255"' + (s.fallback === 0xFF ? ' selected' : '') + '>not set</option>'];
+  for (let i = 0; i < infos.length; i++){
+    if (!infos[i] || !infos[i].valid) continue;
+    const name = infos[i].name || '(unnamed)';
+    opts.push('<option value="' + i + '"' + (s.fallback === i ? ' selected' : '') + '>Slot ' + (i+1) + ' — ' + name + '</option>');
+  }
+  const shown = (window._deskPick && window._deskPick.mask) || s.chord;
+  const chord = shown ? macroChordName(shown) : 'not set';
+  const rec = window._deskRec;
+  return '<div style="font-size:12px;margin-bottom:8px;padding-bottom:8px;border-bottom:1px solid var(--line,#333)">' +
+    '<b>Desktop toggle</b> <span style="color:var(--sub)">— one global chord, not a macro of the current slot. ' +
+    'After a reboot the dongle starts on the fallback slot; it does not remember the Desktop session.</span>' +
+    '<div style="margin-top:6px">Fallback slot ' +
+      '<select onchange="desktopSetFallback(this.value)">' + opts.join('') + '</select></div>' +
+    '<div style="margin-top:6px">Chord: <b id="deskchord">' + (chord || 'not set') + '</b> ' +
+      '<button class="btn btn-outline" style="padding:2px 8px" onclick="desktopRecord()">' + (rec ? 'Stop' : 'Record') + '</button> ' +
+      '<button class="btn btn-outline" style="padding:2px 8px" onclick="desktopPickToggle()">Pick</button> ' +
+      '<button class="btn btn-outline" style="padding:2px 8px" onclick="desktopClearChord()">Clear</button>' +
+      '<div style="color:var(--sub);margin-top:4px">Record adds every button you press before Stop. Pick ticks a combination by hand. The toggle fires only when all of the chosen buttons are held.</div>' +
+    '</div>' +
+    desktopPickHTML() +
+    '<div style="margin-top:6px"><label>Hold <input id="deskhold" type="number" min="0" max="255" value="' + (s.hold_cs|0) +
+      '" style="width:56px" onchange="desktopSetHold(this.value)"> cs</label>' +
+      ' <span style="color:var(--sub)">0 = fire on press. A hold fires once, then the chord is locked until fully released.</span></div>' +
+    '<div style="margin-top:6px"><label><input type="checkbox" ' + (s.lightbar ? 'checked' : '') +
+      ' onchange="desktopSetLightbar(this.checked)"> Lightbar colour while Desktop is active</label> ' +
+      'R <input id="deskr" type="number" min="0" max="255" value="' + (s.r|0) + '" style="width:52px"> ' +
+      'G <input id="deskg" type="number" min="0" max="255" value="' + (s.g|0) + '" style="width:52px"> ' +
+      'B <input id="deskb" type="number" min="0" max="255" value="' + (s.b|0) + '" style="width:52px"> ' +
+      '<button class="btn btn-outline" style="padding:2px 8px" onclick="desktopSaveColour()">Save colour</button>' +
+      ' <span style="color:var(--sub)">Battery warning still wins.</span></div>' +
+    '</div>';
+}
+async function desktopCommit(mut){
+  const s = window._desktop;
+  if (!s){ toast('Desktop settings are not available on this firmware', true); return; }
+  mut(s);
+  const ok = await hidLocked(() => desktopWrite(s));
+  toast(ok ? 'Desktop settings saved' : 'Desktop settings rejected', !ok);
+  if (ok) await refreshSlots();
+}
+function desktopSetFallback(v){
+  desktopCommit(s => { s.fallback = parseInt(v, 10) & 0xFF; });
+}
+function desktopSetHold(v){
+  desktopCommit(s => { s.hold_cs = Math.max(0, Math.min(255, parseInt(v, 10) || 0)); });
+}
+function desktopSetLightbar(on){
+  desktopCommit(s => { s.lightbar = !!on; });
+}
+function desktopSaveColour(){
+  desktopCommit(s => {
+    s.r = parseInt(document.getElementById('deskr').value, 10) || 0;
+    s.g = parseInt(document.getElementById('deskg').value, 10) || 0;
+    s.b = parseInt(document.getElementById('deskb').value, 10) || 0;
+  });
+}
+async function desktopSetSlot(i, on){
+  await desktopCommit(s => { s.desktop = on ? i : 0xFF; });
+}
+function desktopQualifyChord(mask, touchX){
+  let held = mask >>> 0;
+  if (held & (1<<17)) held |= macroPadHalf(touchX);
+  if (held & ((1<<23) | (1<<24))) held &= ~(1<<17);
+  return held >>> 0;
+}
+function desktopOnReport(ev){
+  const st = window._deskRec;
+  if (!st) return;
+  const m = macroButtonMask(ev.data);
+  const f1 = macroTouchPoint(ev.data, 0);
+  if (f1 && f1.down && st.tX0 === undefined) st.tX0 = f1.x;
+  if (m) st.mask = (st.mask | m) >>> 0;
+  const el = document.getElementById('deskchord');
+  const shown = desktopQualifyChord(st.mask, st.tX0);
+  if (el && shown) el.textContent = macroChordName(shown) || '…';
+}
+async function desktopRecord(){
+  if (window._deskRec){
+    const st = window._deskRec;
+    window._deskRec = null;
+    try { device.removeEventListener('inputreport', desktopOnReport); } catch(e){}
+    await macroSuspendFiring(false);
+    const held = desktopQualifyChord(st.mask, st.tX0);
+    if (!held){ toast('No chord captured', true); await refreshSlots(); return; }
+    await desktopCommit(s => { s.chord = held; });
+    return;
+  }
+  if (!(await ensureDevice())){ toast('No device — click Connect', true); return; }
+  window._deskPick = null;
+  await macroSuspendFiring(true);
+  window._deskRec = { mask: 0 };
+  try { device.addEventListener('inputreport', desktopOnReport); } catch(e){}
+  await refreshSlots();
+}
+function desktopPickHTML(){
+  const p = window._deskPick;
+  if (!p) return '';
+  let h = '<div style="border:1px solid #06a;background:#001a2a;padding:8px;border-radius:6px;margin:6px 0">';
+  h += '<div style="font-size:12px;color:var(--sub);margin-bottom:6px">Tick every button in the combination. The toggle fires only when all of them are held.</div>';
+  for (const b of BTN){
+    const on = (p.mask & b[1]) !== 0;
+    h += '<button class="btn' + (on ? '' : ' btn-outline') + '" style="padding:2px 8px;margin:0 4px 4px 0;font-size:12px" ' +
+         'onclick="desktopPickToggleBit(' + b[1] + ', ' + (on ? 'false' : 'true') + ')">' + b[2] + '</button>';
+  }
+  h += '<div style="margin-top:4px;font-size:12px;color:var(--sub)">Chord: ' + (macroChordName(p.mask) || 'none') + '</div>';
+  h += '<div style="margin-top:4px"><button class="btn" style="padding:2px 10px;font-size:12px" onclick="desktopPickApply()">Apply</button>' +
+       ' <button class="btn btn-outline" style="padding:2px 10px;font-size:12px" onclick="desktopPickCancel()">Cancel</button></div>';
+  h += '</div>';
+  return h;
+}
+function desktopRerender(){
+  const dbox = document.getElementById('desktopbox');
+  if (!dbox || !window._desktop) return;
+  dbox.innerHTML = desktopBoxHTML(window._desktop, window._slotInfos || []);
+}
+function desktopPickToggle(){
+  if (window._deskRec) return;
+  const s = window._desktop;
+  if (!s){ toast('Connect first', true); return; }
+  if (window._deskPick) window._deskPick = null;
+  else window._deskPick = { mask: (s.chord >>> 0) };
+  desktopRerender();
+}
+function desktopPickToggleBit(bit, on){
+  const p = window._deskPick; if (!p) return;
+  p.mask = on ? ((p.mask | bit) >>> 0) : ((p.mask & ~bit) >>> 0);
+  const PAD = 1<<17, L = 1<<23, R = 1<<24;
+  if (on && (bit === L || bit === R)) p.mask = (p.mask & ~(PAD | (bit === L ? R : L))) >>> 0;
+  if (on && bit === PAD) p.mask = (p.mask & ~(L | R)) >>> 0;
+  desktopRerender();
+}
+function desktopPickCancel(){ window._deskPick = null; desktopRerender(); }
+async function desktopPickApply(){
+  const p = window._deskPick; if (!p) return;
+  const mask = p.mask >>> 0;
+  window._deskPick = null;
+  if (!mask){ toast('Pick at least one button', true); await refreshSlots(); return; }
+  await desktopCommit(s => { s.chord = mask; });
+}
+async function desktopClearChord(){
+  if (window._deskRec){ window._deskRec = null;
+    try { device.removeEventListener('inputreport', desktopOnReport); } catch(e){}
+    await macroSuspendFiring(false);
+  }
+  await desktopCommit(s => { s.chord = 0; s.hold_cs = 0; });
 }
 
 // Currently-loaded profile (fw 1.18.22+): the dongle tracks which slot is live
@@ -707,6 +879,10 @@ async function _refreshSlotsOnce(){
     return;
   }
   let rows = '';
+  const infos = [];
+  let desk = null;
+  try { desk = await hidLocked(() => desktopRead()); } catch(_) { desk = null; }
+  window._desktop = desk;
   for (let i = 0; i < UI_SLOT_COUNT; i++){ // older fw reports out-of-range indices as empty
     let info = await hidLocked(() => slotInfo(i));
     if (info === null){
@@ -723,10 +899,16 @@ async function _refreshSlotsOnce(){
       if (_slotHealTries++ < 8) setTimeout(() => refreshSlots(), 1500);
       return;
     }
+    infos[i] = info;
     const label = info && info.valid ? `<b>${info.name || '(unnamed)'}</b>` : '<span style="color:var(--sub)">empty</span>';
+    const isDesk = desk && desk.desktop === i;
+    const deskBox = (desk && info && info.valid)
+      ? `<label style="font-size:12px"><input type="checkbox" ${isDesk ? 'checked' : ''} onchange="desktopSetSlot(${i}, this.checked)"> Desktop</label>`
+      : '';
     rows += `<div style="display:flex;gap:8px;align-items:center;margin:4px 0">
       <span style="width:52px;color:var(--sub)">Slot ${i+1}</span>
       <span style="flex:1">${label}</span>
+      ${deskBox}
       <button class="btn btn-outline" style="padding:2px 10px" onclick="uiSlotSave(${i})">Save current</button>
       <button class="btn btn-outline" style="padding:2px 10px" ${info && info.valid ? '' : 'disabled'} onclick="uiSlotActivate(${i})">Activate</button>
     </div>`;
@@ -740,6 +922,11 @@ async function _refreshSlotsOnce(){
               onchange="if(this.files[0]){restoreAllSlots(this.files[0]); this.value='';}">
        <span id="backupStatus" style="flex:1;color:var(--sub);font-size:12px"></span>
      </div>`;
+  window._slotInfos = infos;
+  const dbox = document.getElementById('desktopbox');
+  const editing = document.activeElement && document.activeElement.tagName === 'INPUT'
+    && document.activeElement.closest && document.activeElement.closest('#desktopbox');
+  if (dbox && !editing) dbox.innerHTML = desktopBoxHTML(desk, infos);
   _slotHealTries = 0; // full list rendered - reset the self-heal budget
 }
 async function refreshSlots(){
@@ -5737,6 +5924,7 @@ function render(){
   ` + (!q && tab==='slots' ? `<div class="card"><div class="card-title">Profile Slots <span style="font-size:11px;color:var(--sub)">(stored on the dongle — fw 1.1.2+)</span></div>
     <div style="font-size:12px;color:var(--sub);margin-bottom:6px">Save the current settings into a numbered slot once; activating a slot later is a single instant command (used by the automation via slot-activate.html).</div>
     <div style="font-size:12px;margin-bottom:8px">📥 <a href="https://artzox.github.io/DS5Dongle-Studio/profiles.html" target="_blank" rel="noopener" style="color:var(--accent)">Browse shared game profiles ↗</a> <span style="color:var(--sub)">— download one, use Import Profile above, then save it into a slot.</span></div>
+    <div id="desktopbox" style="font-size:13px"></div>
     <div id="slotbox" style="font-size:13px">Connect to manage slots.</div></div>` : '') + `
   ` + (!q && tab==='triggers' ? `<div class="card"><div class="card-title">Trigger Effect Monitor &amp; Custom Effects <span style="font-size:11px;color:var(--sub)">(capture real game effects)</span></div>
     <div style="font-size:12px;color:var(--sub);margin-bottom:6px">Captures genuine adaptive-trigger effects a game sends (resistance, weapon-break, vibration). Play the game, do the action, press Refresh. Tick the states that make up one action (up to 5), then <b>Assign</b>. Mechanical states (weapon-breaks, resistances) replay <b>positionally in sequence</b> along the pull — walls and resistances land at their captured trigger positions; vibration pairs blend at the rate slider. Configure the condition/threshold/rate in the trigger's Custom Effect fields above, then Save to a slot. <b>Note:</b> only real game-sent effects capture — firmware-converted rumble (e.g. Control) and DS4Windows/Xbox rumble do not, as those aren't trigger effects the game sent.</div>

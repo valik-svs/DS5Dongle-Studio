@@ -355,7 +355,11 @@ void wake_task(void) {
     // polling it recovers a missed callback.
     {
         const bool tu_susp = tud_suspended();
-        if (tu_susp && !host_suspended) {
+        // A deliberate reconnect (Desktop toggle, HID 0x03) makes TinyUSB
+        // report suspended while the bus is down. tud_suspend_cb already
+        // ignores that window; this poll used to set host_suspended anyway,
+        // and the chord handler then dropped every later press.
+        if (tu_susp && !host_suspended && time_us_64() >= reconnect_until_us) {
             host_suspended = true;
             if (suspend_at_us == 0) suspend_at_us = now;
             // Not necessarily a miss: TinyUSB sets its suspended flag in the

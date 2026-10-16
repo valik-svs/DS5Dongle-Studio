@@ -12,6 +12,7 @@
 //   -3   ACTIVE CONFIG
 //   -4 .. -19   SLOT RESERVATION (SLOT_SECTORS_RESERVED)
 //   -20  MACRO TABLE, growing downward if it ever needs a second sector
+//   -21  DESKTOP METADATA (device-global; not part of a slot payload)
 //
 
 #ifndef DS5_BRIDGE_FLASH_MAP_H
@@ -54,5 +55,16 @@ constexpr uint32_t MACRO_FLASH_OFFSET =
 static_assert(MACRO_FLASH_OFFSET % FLASH_SECTOR_SIZE == 0);
 static_assert(MACRO_FLASH_OFFSET < slot_sector_offset_at(SLOT_SECTORS_RESERVED - 1),
               "macro sector must sit strictly below every reserved slot sector");
+
+// --- Desktop metadata --------------------------------------------------------
+// One sector below the macro table. Not anchored to SLOT_COUNT: raising the
+// slot count must not move this, or a firmware update would orphan the
+// Desktop designation. The macro sector is already below the slot reservation,
+// so this one is too.
+constexpr uint32_t DESKTOP_FLASH_OFFSET = MACRO_FLASH_OFFSET - FLASH_SECTOR_SIZE;
+
+static_assert(DESKTOP_FLASH_OFFSET % FLASH_SECTOR_SIZE == 0);
+static_assert(DESKTOP_FLASH_OFFSET + FLASH_SECTOR_SIZE == MACRO_FLASH_OFFSET,
+              "desktop metadata must sit in the sector immediately below macros");
 
 #endif // DS5_BRIDGE_FLASH_MAP_H

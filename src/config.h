@@ -493,6 +493,9 @@ bool slot_load_body(uint8_t idx, Config_body &out);
 // is tracked; otherwise fills the source slot name and sets edited when the live
 // config has diverged from the slot as loaded.
 bool active_profile_get(uint8_t &slot_out, bool &edited_out, uint8_t name_out[SLOT_NAME_LEN]);
+// 0xFF when the live config was not loaded from a slot (fresh boot, before any
+// activation). Same RAM value active_profile_get reports, without the name.
+uint8_t active_slot_index();
 Config_body& get_config();
 void set_config(const uint8_t *new_config, const uint16_t len);
 void config_valid();
